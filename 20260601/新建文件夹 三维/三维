@@ -1,0 +1,449 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+==============================================================================
+  三维杆单元（空间桁架单元）刚度矩阵与应力计算程序
+  课程作业：程序设计作业 —— 三维杆单元刚度矩阵与应力计算
+  对应内容：2.2 单元刚度方程 Element Stiffness Equation
+
+  单位约定：N, m, Pa
+  仅使用 NumPy 进行基础矩阵运算，不调用任何有限元商业软件或现成有限元库
+==============================================================================
+"""
+
+import numpy as np
+
+
+# ==============================================================================
+#  核心函数
+# ==============================================================================
+
+def truss3dElement_stiffness(x1, x2, E, A):
+    """
+    计算三维杆单元在全局坐标系下的单元刚度矩阵。
+
+    根据课件推导：
+        方向余弦  cx = x21/L,  cy = y21/L,  cz = z21/L
+        刚度系数  k  = E*A/L
+        Ke = k * [ c*c^T   -c*c^T ]
+                 [ -c*c^T   c*c^T ]
+    其中 c = [cx, cy, cz]^T
+
+    Parameters
+    ----------
+    x1 : array_like
+        节点1坐标 [x, y, z]，单位 m
+    x2 : array_like
+        节点2坐标 [x, y, z]，单位 m
+    E : float
+        弹性模量，单位 Pa
+    A : float
+        截面积，单位 m^2
+
+    Returns
+    -------
+    L : float
+        单元长度，单位 m
+    direction_cosines : tuple
+        方向余弦 (cx, cy, cz)
+    Ke : ndarray, shape (6, 6)
+        全局坐标系下的 6x6 单元刚度矩阵，单位 N/m
+    """
+    x1 = np.asarray(x1, dtype=np.float64)
+    x2 = np.asarray(x2, dtype=np.float64)
+
+    # 坐标增量 x21 = x2 - x1, y21 = y21 - y1, z21 = z2 - z1
+    delta = x2 - x1
+
+    # 单元长度
+    L = np.linalg.norm(delta)
+
+    # 退化单元检查：两节点重合
+    if L < 1e-15:
+        raise ValueError("错误：两个节点重合，单元长度为零，无法建立单元。")
+
+    # 方向余弦
+    cx, cy, cz = delta / L
+    direction_cosines = (cx, cy, cz)
+
+    # 刚度系数 k = EA / L
+    k = E * A / L
+
+    # 方向余弦向量
+    c = np.array([cx, cy, cz])
+
+    # 子块 cc^T (3x3)
+    cc = np.outer(c, c)
+
+    # 组装 6x6 刚度矩阵（分块形式）
+    # [  cc   -cc ]
+    # [ -cc    cc ]
+    Ke = np.zeros((6, 6))
+    Ke[0:3, 0:3] =  cc
+    Ke[0:3, 3:6] = -cc
+    Ke[3:6, 0:3] = -cc
+    Ke[3:6, 3:6] =  cc
+    Ke *= k
+
+    return L, direction_cosines, Ke
+
+
+def truss3dElement_stress(x1, x2, E, A, de):
+    """
+    根据单元节点位移计算三维杆单元的轴向应变、应力和轴力。
+
+    根据课件推导：
+        B^e = (1/L) * [-cx, -cy, -cz,  cx,  cy,  cz]   （应变-位移矩阵，1x6）
+        epsilon = B^e * d^e                              （轴向应变）
+        sigma   = E * epsilon                            （轴向应力，胡克定律）
+        N       = A * sigma                              （轴力，受拉为正）
+
+    Parameters
+    ----------
+    x1 : array_like
+        节点1坐标 [x, y, z]，单位 m
+    x2 : array_like
+        节点2坐标 [x, y, z]，单位 m
+    E : float
+        弹性模量，单位 Pa
+    A : float
+        截面积，单位 m^2
+    de : array_like
+        单元节点位移 [u1, v1, w1, u2, v2, w2]，单位 m
+
+    Returns
+    -------
+    epsilon : float
+        轴向应变（无量纲）
+    sigma : float
+        轴向应力，单位 Pa
+    N : float
+        轴力，单位 N（受拉为正）
+    """
+    x1 = np.asarray(x1, dtype=np.float64)
+    x2 = np.asarray(x2, dtype=np.float64)
+    de = np.asarray(de, dtype=np.float64)
+
+    delta = x2 - x1
+    L = np.linalg.norm(delta)
+
+    if L < 1e-15:
+        raise ValueError("错误：两个节点重合，单元长度为零，无法计算。")
+
+    # 方向余弦
+    cx, cy, cz = delta / L
+
+    # 应变-位移矩阵 B^e (1x6)
+    Be = (1.0 / L) * np.array([-cx, -cy, -cz, cx, cy, cz])
+
+    # 轴向应变
+    epsilon = float(Be @ de)
+
+    # 轴向应力
+    sigma = E * epsilon
+
+    # 轴力
+    N = A * sigma
+
+    return epsilon, sigma, N
+
+
+# ==============================================================================
+#  辅助检验函数
+# ==============================================================================
+
+def verify_symmetry(Ke):
+    """检查刚度矩阵是否对称：Ke == Ke^T"""
+    return np.allclose(Ke, Ke.T, atol=1e-8)
+
+
+def verify_eigenvalues(Ke):
+    """计算刚度矩阵的特征值（使用对称矩阵专用算法），检查是否非负"""
+    eigenvalues = np.linalg.eigvalsh(Ke)
+    all_nonneg = np.all(eigenvalues >= -1e-6 * np.max(np.abs(eigenvalues)))
+    return eigenvalues, bool(all_nonneg)
+
+
+def verify_rigid_body_translation(Ke, x1, x2, E, A):
+    """
+    检查刚体平移位移不产生内力。
+    给所有节点施加相同的位移向量，应变为零，内力为零。
+    """
+    # 随机选择一个平移向量
+    t = np.array([1.2e-3, -0.7e-3, 0.5e-3, 1.2e-3, -0.7e-3, 0.5e-3])
+    epsilon, sigma, N = truss3dElement_stress(x1, x2, E, A, t)
+    return epsilon, sigma, N
+
+
+# ==============================================================================
+#  任务 3：验证算例
+# ==============================================================================
+
+def run_example_1():
+    """
+    算例1：沿 x 轴的一维杆单元
+    节点1: (0,0,0), 节点2: (2,0,0)
+    E = 200 GPa, A = 1e-4 m^2
+    de = [0, 0, 0, 1e-3, 0, 0]^T m
+    """
+    print("=" * 70)
+    print("  算例 1：沿 x 轴的一维杆单元")
+    print("=" * 70)
+
+    x1 = [0, 0, 0]
+    x2 = [2, 0, 0]
+    E = 200e9        # 200 GPa
+    A = 1.0e-4       # 1.0e-4 m^2
+    de = np.array([0.0, 0.0, 0.0, 1.0e-3, 0.0, 0.0])
+
+    # ---------- 计算刚度矩阵 ----------
+    L, (cx, cy, cz), Ke = truss3dElement_stiffness(x1, x2, E, A)
+
+    print(f"\n单元长度  L = {L} m")
+    print(f"方向余弦  cx = {cx},  cy = {cy},  cz = {cz}")
+    print(f"刚度系数  k = EA/L = {E * A / L:.4e} N/m")
+    print(f"\n6x6 单元刚度矩阵 Ke (N/m):")
+    print_matrix(Ke)
+
+    # ---------- 计算应变、应力、轴力 ----------
+    epsilon, sigma, N = truss3dElement_stress(x1, x2, E, A, de)
+
+    print(f"\n节点位移  de = {de}")
+    print(f"轴向应变  epsilon = {epsilon:.6e}")
+    print(f"轴向应力  sigma   = {sigma:.6e} Pa  =  {sigma / 1e6:.2f} MPa")
+    print(f"轴力      N       = {N:.6e} N")
+
+    # ---------- 验证 ----------
+    print("\n--- 验证结果 ---")
+    check("单元长度应为 2 m",           abs(L - 2.0) < 1e-10)
+    check("方向余弦应为 (1, 0, 0)",     abs(cx - 1) < 1e-10 and abs(cy) < 1e-10 and abs(cz) < 1e-10)
+    check("轴向应变应为 5.0e-4",        abs(epsilon - 5.0e-4) < 1e-12)
+    check("轴向应力应为 100 MPa",       abs(sigma - 100e6) < 1e3)
+    check("轴力应为 1.0e4 N",           abs(N - 1.0e4) < 1e-2)
+
+    # 检查刚度矩阵是否退化为一维形式
+    print("\n  刚度矩阵退化检查：")
+    print("  仅与两节点 x 向自由度有关（第1、4行/列），其余行列为零。")
+    check("Ke 只在 (1,1),(1,4),(4,1),(4,4) 处非零",
+          abs(Ke[0, 0] - E*A/L) < 1e-4 and abs(Ke[0, 3] + E*A/L) < 1e-4 and
+          np.allclose(Ke[1:3, :], 0, atol=1e-4) and np.allclose(Ke[4:6, :], 0, atol=1e-4) and
+          np.allclose(Ke[:, 1:3], 0, atol=1e-4) and np.allclose(Ke[:, 4:6], 0, atol=1e-4))
+
+
+def run_example_2():
+    """
+    算例2：空间任意方向杆单元
+    节点1: (0,0,0), 节点2: (1,2,2)
+    E = 210 GPa, A = 2e-4 m^2
+    de = [0, 0, 0, 1e-3, 2e-3, 2e-3]^T m
+    """
+    print("\n")
+    print("=" * 70)
+    print("  算例 2：空间任意方向杆单元")
+    print("=" * 70)
+
+    x1 = [0, 0, 0]
+    x2 = [1, 2, 2]
+    E = 210e9        # 210 GPa
+    A = 2.0e-4       # 2.0e-4 m^2
+    de = np.array([0.0, 0.0, 0.0, 1.0e-3, 2.0e-3, 2.0e-3])
+
+    # ---------- 计算刚度矩阵 ----------
+    L, (cx, cy, cz), Ke = truss3dElement_stiffness(x1, x2, E, A)
+
+    print(f"\n单元长度  L = {L} m")
+    print(f"方向余弦  cx = {cx:.6f},  cy = {cy:.6f},  cz = {cz:.6f}")
+    print(f"          理论值: 1/3 = {1/3:.6f},  2/3 = {2/3:.6f},  2/3 = {2/3:.6f}")
+    print(f"刚度系数  k = EA/L = {E * A / L:.4e} N/m")
+    print(f"\n6x6 单元刚度矩阵 Ke (N/m):")
+    print_matrix(Ke)
+
+    # ---------- 刚度矩阵性质检查 ----------
+    print("\n--- 刚度矩阵性质检查 ---")
+
+    # (1) 对称性
+    is_sym = verify_symmetry(Ke)
+    check("Ke 对称 (Ke = Ke^T)", is_sym)
+
+    # (2) 特征值
+    eigenvalues, all_nonneg = verify_eigenvalues(Ke)
+    print(f"\n  特征值: ")
+    for i, ev in enumerate(eigenvalues):
+        print(f"    lambda_{i+1} = {ev:.6e}")
+    check("所有特征值非负 (半正定)", all_nonneg)
+
+    # (3) 奇异性
+    det_Ke = np.linalg.det(Ke)
+    is_singular = abs(det_Ke) < 1e-4 * np.max(np.abs(eigenvalues))
+    print(f"\n  det(Ke) = {det_Ke:.6e}")
+    check("Ke 奇异 (det = 0)", is_singular)
+    print("  原因：单个自由杆单元在三维空间中存在刚体位移（3个刚体平移自由度），")
+    print("  给定任意刚体平移位移 d_rigid，有 Ke * d_rigid = 0，")
+    print("  说明 Ke 存在零特征值，因此行列式为零，矩阵奇异。")
+
+    # (4) 刚体平移不产生内力
+    eps_r, sig_r, N_r = verify_rigid_body_translation(Ke, x1, x2, E, A)
+    print(f"\n  刚体平移检查：施加所有节点相同位移 [1.2e-3, -0.7e-3, 0.5e-3]")
+    print(f"    epsilon = {eps_r:.2e},  sigma = {sig_r:.2e} Pa,  N = {N_r:.2e} N")
+    check("刚体平移不产生内力 (N ≈ 0)", abs(N_r) < 1e-8)
+
+    # ---------- 计算应变、应力、轴力 ----------
+    epsilon, sigma, N = truss3dElement_stress(x1, x2, E, A, de)
+
+    print(f"\n--- 应力计算 ---")
+    print(f"节点位移  de = {de}")
+    print(f"轴向应变  epsilon = {epsilon:.6e}")
+    print(f"轴向应力  sigma   = {sigma:.6e} Pa  =  {sigma / 1e6:.2f} MPa")
+    print(f"轴力      N       = {N:.6e} N")
+
+    # ---------- 验证 ----------
+    print("\n--- 验证结果 ---")
+    check("单元长度应为 3 m",                   abs(L - 3.0) < 1e-10)
+    check("方向余弦应为 (1/3, 2/3, 2/3)",       abs(cx - 1/3) < 1e-10 and abs(cy - 2/3) < 1e-10 and abs(cz - 2/3) < 1e-10)
+    check("轴向应变应为 1.0e-3",                abs(epsilon - 1.0e-3) < 1e-12)
+    check("轴向应力应为 210 MPa",               abs(sigma - 210e6) < 1e3)
+    check("轴力应为 4.2e4 N",                   abs(N - 4.2e4) < 1e-2)
+
+
+# ==============================================================================
+#  任务 4：刚度矩阵物理意义验证
+# ==============================================================================
+
+def run_task_4():
+    """
+    任务4：任选一个自由度 j，令该自由度位移为 1，其他自由度位移为 0，
+    计算 Fe = Ke * de，解释所得节点力阵与刚度矩阵第 j 列之间的关系，
+    并说明 K_ij 的物理意义。
+    """
+    print("\n")
+    print("=" * 70)
+    print("  任务 4：刚度矩阵物理意义验证")
+    print("=" * 70)
+
+    x1 = [0, 0, 0]
+    x2 = [1, 2, 2]
+    E = 210e9
+    A = 2.0e-4
+
+    _, _, Ke = truss3dElement_stiffness(x1, x2, E, A)
+
+    dof_labels = ["u1x", "u1y", "u1z", "u2x", "u2y", "u2z"]
+
+    print("\n物理意义：")
+    print("  K_ij^e 表示：当单元的第 j 个自由度给定单位位移、")
+    print("  而其它自由度固定为零时，为了使单元平衡而需要在")
+    print("  第 i 个自由度上施加的节点力。")
+    print()
+
+    # 分别对 j = 1, 4 进行验证（选取两个有代表性的自由度）
+    test_j_indices = [0, 3]  # j=1 对应 u1x, j=4 对应 u2x
+
+    for j in test_j_indices:
+        de_test = np.zeros(6)
+        de_test[j] = 1.0
+        Fe = Ke @ de_test
+        col_j = Ke[:, j]
+
+        print(f"  ── 自由度 j = {j+1}（{dof_labels[j]}）：令 d_{j+1} = 1，其余为 0 ──")
+        print(f"    d^e = {de_test}")
+        print(f"    F^e = Ke * d^e :")
+        for i in range(6):
+            print(f"      {dof_labels[i]:>4s}  = {Fe[i]:>14.4f} N")
+        print(f"    Ke 第 {j+1} 列 :")
+        for i in range(6):
+            print(f"      Ke[{i+1},{j+1}] = {col_j[i]:>14.4f} N")
+
+        match = np.allclose(Fe, col_j)
+        print(f"    F^e 与 Ke 第 {j+1} 列一致？ {match}")
+        print()
+
+    print("  结论：")
+    print("    当第 j 个自由度位移为 1、其它自由度为 0 时，")
+    print("    F^e = Ke * d^e 恰好等于 Ke 的第 j 列。")
+    print("    这验证了 Ke 第 j 列的物理意义：第 j 个自由度发生")
+    print("    单位位移时，各自由度上所需施加的节点力。")
+    print("    对应地，K_ij^e 的物理意义即为上述条件中第 i 个")
+    print("    自由度上所需的节点力。")
+
+
+# ==============================================================================
+#  退化单元检查
+# ==============================================================================
+
+def run_degenerate_check():
+    """检查两节点重合时程序是否正确报错。"""
+    print("\n")
+    print("=" * 70)
+    print("  退化单元检查")
+    print("=" * 70)
+
+    print("\n  测试：两节点重合 x1 = [0,0,0], x2 = [0,0,0]")
+    try:
+        truss3dElement_stiffness([0, 0, 0], [0, 0, 0], 200e9, 1e-4)
+        print("  结果：未捕到错误（异常！）")
+    except ValueError as e:
+        print(f"  正确捕获错误: {e}")
+
+    print("\n  测试：应变计算时两节点重合")
+    try:
+        truss3dElement_stress([0, 0, 0], [0, 0, 0], 200e9, 1e-4, [0, 0, 0, 1e-3, 0, 0])
+        print("  结果：未捕到错误（异常！）")
+    except ValueError as e:
+        print(f"  正确捕获错误: {e}")
+
+
+# ==============================================================================
+#  工具函数
+# ==============================================================================
+
+def print_matrix(M, precision=4):
+    """格式化打印矩阵"""
+    n_rows, n_cols = M.shape
+    for i in range(n_rows):
+        row_str = "    ["
+        for j in range(n_cols):
+            val = M[i, j]
+            if abs(val) < 1e-8:
+                row_str += f"  {'0':>14s}"
+            else:
+                row_str += f"  {val:>14.{precision}f}"
+        row_str += "  ]"
+        print(row_str)
+
+
+def check(description, passed):
+    """打印检查结果"""
+    mark = "PASS" if passed else "FAIL"
+    print(f"  [{mark}]  {description}")
+
+
+# ==============================================================================
+#  主程序入口
+# ==============================================================================
+
+if __name__ == "__main__":
+
+    print()
+    print("+" + "=" * 68 + "+")
+    print("|   三维杆单元（空间桁架单元）刚度矩阵与应力计算程序             |")
+    print("|   单位: N, m, Pa                                                |")
+    print("+" + "=" * 68 + "+")
+
+    # 算例 1
+    run_example_1()
+
+    # 算例 2
+    run_example_2()
+
+    # 任务 4：物理意义验证
+    run_task_4()
+
+    # 退化单元检查
+    run_degenerate_check()
+
+    print("\n")
+    print("+" + "=" * 68 + "+")
+    print("|   所有算例运行完毕。                                           |")
+    print("+" + "=" * 68 + "+")
+    print()
+
